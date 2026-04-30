@@ -76,6 +76,7 @@ GO
     public static string BuildDeactivateScript(string sourceDb) => $@"-- Disattivazione Trigger Audit  {DateTime.Now}
 USE [{sourceDb}];
 GO
+PRINT 'Inizio - Trigger disattivati'
 DECLARE @sql NVARCHAR(MAX) = '';
 SELECT @sql = @sql + 'DISABLE TRIGGER ' + QUOTENAME(SCHEMA_NAME(t.schema_id)) + '.' + QUOTENAME(tr.name)
     + ' ON ' + QUOTENAME(SCHEMA_NAME(t.schema_id)) + '.' + QUOTENAME(t.name) + '; '
@@ -83,6 +84,7 @@ FROM sys.triggers tr INNER JOIN sys.tables t ON tr.parent_id = t.object_id
 WHERE tr.name LIKE 'tr_AUDIT%' AND tr.is_disabled = 0;
 IF @sql <> '' BEGIN EXEC sp_executesql @sql; PRINT 'Trigger disattivati'; END
 ELSE PRINT 'Nessun trigger da disattivare';
+PRINT 'Fine - Trigger disattivati'
 GO
 ";
 

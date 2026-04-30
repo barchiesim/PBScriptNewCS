@@ -4,4 +4,7 @@ public class AuditSettings
 {
     public string AuditFilter { get; set; } = "and (SUBSTRING(name,3,1) = '_')";
     public string AuditExclude { get; set; } = "and name NOT IN ('NUMBERS', 'FW_ASYNC_SCHEDULER', 'FW_PROCESSING_DETAILS')";
+    // Persisted UI settings
+    public string TableSearch { get; set; } = string.Empty;
+    public bool DefaultConditionalUpdate { get; set; } = false;
 }

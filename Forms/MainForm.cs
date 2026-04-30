@@ -20,6 +20,7 @@ public class MainForm : Form
     private TableInfo? _selectedTable = null;
     private string _auditFilter = string.Empty;
     private string _auditExclude = string.Empty;
+    private bool _defaultConditionalUpdate = false;
 
     // Guard: prevents re-entrant async calls
     private bool _busy = false;
@@ -52,10 +53,15 @@ public class MainForm : Form
         _config = config;
         _dbExplorer = new DatabaseExplorerService(sqlService);
 
-        // Carica le impostazioni audit salvate
+        // Carica le impostazioni audit salvate (incluso stato UI)
         var auditSettings = SettingsService.LoadAuditSettings();
         _auditFilter = auditSettings.AuditFilter;
         _auditExclude = auditSettings.AuditExclude;
+        // Restore saved table search and default conditional update flag
+        txtTableSearch = new TextBox(); // temporary until InitializeComponent sets the real one
+        txtTableSearch.Text = auditSettings.TableSearch;
+        // Store default flag to use when showing ColumnSelectorDialog
+        _defaultConditionalUpdate = auditSettings.DefaultConditionalUpdate;
 
         InitializeComponent();
 
@@ -107,6 +113,16 @@ public class MainForm : Form
             splitRight.IsSplitterFixed = false;  // Sblocca lo splitter per permettere all'utente di spostarlo
         }
         catch { /* ignore splitter errors */ }
+
+        // Restore UI persisted settings
+        try
+        {
+            var s = Services.SettingsService.LoadAuditSettings();
+            if (!string.IsNullOrEmpty(s.TableSearch))
+                txtTableSearch.Text = s.TableSearch;
+            _defaultConditionalUpdate = s.DefaultConditionalUpdate;
+        }
+        catch { }
     }
 
     // ─── UI Build ────────────────────────────────────────────────────────────
@@ -119,9 +135,10 @@ public class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9f);
 
+        // Build main layout first so Docking of ToolStrip/StatusStrip applied afterwards
+        BuildMainLayout();
         BuildToolStrip();
         BuildStatusBar();
-        BuildMainLayout();
     }
 
     private void BuildToolStrip()
@@ -184,6 +201,8 @@ public class MainForm : Form
         var lblTables = new Label { Text = "Tabelle:", Dock = DockStyle.Top, Height = 20, Font = new Font("Segoe UI", 7.5f, FontStyle.Bold) };
         lstTables = new ListBox { Dock = DockStyle.Fill, Font = new Font("Courier New", 7.5f) };
         lstTables.DoubleClick += async (_, _) => await GuardAsync(LoadTableStructureAsync);
+        // Aggiorna lo script anche al singolo click/selezione
+        lstTables.SelectedIndexChanged += async (_, _) => await GuardAsync(LoadTableStructureAsync);
 
         pnlLeft.Controls.Add(lstTables);
         pnlLeft.Controls.Add(lblTables);
@@ -231,8 +250,9 @@ public class MainForm : Form
                 _ = GuardAsync(ExecuteQueryAsync);
             }
         };
-        pnlSql.Controls.Add(rtbSqlScript);
+        // Aggiungi prima il label (dock top) poi il controllo fill per evitare che il controllo riempia l'intera area
         pnlSql.Controls.Add(lblSql);
+        pnlSql.Controls.Add(rtbSqlScript);
         splitRight.Panel1.Controls.Add(pnlSql);
 
         // ── Tab control ───────────────────────────────────────────────────
@@ -282,6 +302,8 @@ public class MainForm : Form
 
         splitMain.Panel2.Controls.Add(splitRight);
         Controls.Add(splitMain);
+
+        // Rimuove manipolazioni manuali della z-order: lascia che il sistema di Dock gestisca il layout
 
         ResumeLayout(false);
     }
@@ -380,7 +402,22 @@ public class MainForm : Form
         try
         {
             _keyColumns = await _dbExplorer.GetTableKeyColumnsAsync(db, schema, tbl);
-            rtbSqlScript.Text = $"SELECT * FROM [{schema}].[{tbl}]";
+            var scriptText = $"SELECT * FROM [{schema}].[{tbl}]";
+            Action apply = () =>
+            {
+                // Replace the SQL editor content when selecting a table
+                rtbSqlScript.Text = scriptText;
+                rtbSqlScript.SelectionStart = 0;
+                rtbSqlScript.ScrollToCaret();
+                rtbSqlScript.BackColor = SystemColors.Window;
+                rtbSqlScript.ForeColor = SystemColors.WindowText;
+                rtbSqlScript.Visible = true;
+                rtbSqlScript.BringToFront();
+                rtbSqlScript.Refresh();
+            };
+
+            if (rtbSqlScript.InvokeRequired) rtbSqlScript.Invoke(apply);
+            else apply();
         }
         finally { SetLoading(false); }
     }
@@ -401,6 +438,22 @@ public class MainForm : Form
         var lineCount = script.Split('\n').Length;
         AddMessage($"📋 Inizio esecuzione ({lineCount} righe, {goCount} batch GO)");
 
+        // Detect special operations (triggers) and add more descriptive messages for execution
+        string? specialOp = null;
+        try
+        {
+            var s = script.ToUpperInvariant();
+            if (Regex.IsMatch(s, @"\bDISABLE\s+TRIGGER\b")) specialOp = "Disattivazione trigger";
+            else if (Regex.IsMatch(s, @"\bENABLE\s+TRIGGER\b")) specialOp = "Attivazione trigger";
+            else if (Regex.IsMatch(s, @"\bCREATE\s+TRIGGER\b")) specialOp = "Creazione trigger";
+            else if (Regex.IsMatch(s, @"\bDROP\s+TRIGGER\b")) specialOp = "Eliminazione trigger";
+            else if (Regex.IsMatch(s, @"\bALTER\s+TRIGGER\b")) specialOp = "Modifica trigger";
+        }
+        catch { specialOp = null; }
+
+        if (!string.IsNullOrEmpty(specialOp))
+            AddMessage($"▶ Inizio esecuzione operazione: {specialOp}");
+
         try
         {
             var result = await _sql.ExecuteQueryAsync(script);
@@ -409,6 +462,7 @@ public class MainForm : Form
                 _queryResult = result.Data;
                 PopulateGrid(_queryResult);
                 AddMessage($"✅ {result.Data.Count} righe restituite");
+                if (!string.IsNullOrEmpty(specialOp)) AddMessage($"▶ Fine esecuzione operazione: {specialOp}");
                 tabResults.SelectedTab = tabGrid;
             }
             else if (result.Success)
@@ -416,6 +470,7 @@ public class MainForm : Form
                 _queryResult = new();
                 dgvResults.DataSource = null;
                 AddMessage("✅ Script eseguito con successo (nessun risultato)");
+                if (!string.IsNullOrEmpty(specialOp)) AddMessage($"▶ Fine esecuzione operazione: {specialOp}");
                 tabResults.SelectedTab = tabMessages;
             }
             else
@@ -512,22 +567,75 @@ public class MainForm : Form
         }
 
         var allCols = _queryResult[0].Keys.ToList();
-        using var dlg = new ColumnSelectorDialog(allCols, _keyColumns, $"{_selectedTable.TableSchema}.{_selectedTable.TableName}", scriptType);
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        // Escludi automaticamente i campi di tipo VersionTs/rowversion/timestamp
+        var versionNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "VersionTs", "versionts", "rowversion", "timestamp" };
+        var versionCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var col in allCols)
+        {
+            // Se il nome suggerisce una colonna version oppure il valore è un byte[] (rowversion)
+            var val = _queryResult[0].GetValueOrDefault(col);
+            if (versionNames.Contains(col) || val is byte[])
+                versionCols.Add(col);
+        }
+
+        var filteredCols = allCols.Except(versionCols, StringComparer.OrdinalIgnoreCase).ToList();
+        var filteredKeyCols = _keyColumns.Except(versionCols, StringComparer.OrdinalIgnoreCase).ToList();
+
 
         var selRows = selectedIndices.Select(i => _queryResult[i]).ToList();
-        var script = scriptType switch
-        {
-            "INSERT" => BuildInsertScript(_selectedTable, dlg.SelectedKeyColumns, dlg.SelectedColumns, selRows),
-            "UPDATE" => BuildUpdateScript(_selectedTable, dlg.SelectedKeyColumns, dlg.SelectedColumns, selRows),
-            "DELETE" => BuildDeleteScript(_selectedTable, dlg.SelectedKeyColumns, selRows),
-            _ => ""
-        };
 
-        rtbGeneratedScript.Text = script;
+        string script;
+        if (scriptType == "DELETE")
+        {
+            // For DELETE do not show the column selector: use detected key columns. If none, fallback to all columns.
+            var keyColsForDelete = filteredKeyCols.Count > 0 ? filteredKeyCols : filteredCols;
+            if (keyColsForDelete.Count == 0)
+            {
+                MessageBox.Show("Impossibile determinare colonne chiave per DELETE.", "Attenzione", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            script = BuildDeleteScript(_selectedTable, keyColsForDelete, selRows);
+        }
+        else
+        {
+            using var dlg = new ColumnSelectorDialog(filteredCols, filteredKeyCols, $"{_selectedTable.TableSchema}.{_selectedTable.TableName}", scriptType, _defaultConditionalUpdate);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+            // Remember user's choice for next time
+            _defaultConditionalUpdate = dlg.ConditionalUpdate;
+
+            if (scriptType == "INSERT")
+                script = BuildInsertScript(_selectedTable, dlg.SelectedKeyColumns, dlg.SelectedColumns, selRows);
+            else // UPDATE
+                script = dlg.ConditionalUpdate
+                    ? BuildConditionalUpdateScript(_selectedTable, dlg.SelectedKeyColumns, dlg.SelectedColumns, selRows)
+                    : BuildUpdateScript(_selectedTable, dlg.SelectedKeyColumns, dlg.SelectedColumns, selRows);
+        }
+
+        AppendToGeneratedScript(script);
         //  EnsureHorizontalScrollBar(rtbGeneratedScript);
         tabResults.SelectedTab = tabText;
         AddMessage($"Creazione script {scriptType} terminata ({selRows.Count} comandi)");
+    }
+
+    // Appends text to the generated script pane (thread-safe)
+    private void AppendToGeneratedScript(string text)
+    {
+        if (rtbGeneratedScript is null) return;
+        Action apply = () =>
+        {
+            if (!string.IsNullOrEmpty(rtbGeneratedScript.Text))
+                rtbGeneratedScript.AppendText(Environment.NewLine + text);
+            else
+                rtbGeneratedScript.AppendText(text);
+            rtbGeneratedScript.SelectionStart = rtbGeneratedScript.TextLength;
+            rtbGeneratedScript.ScrollToCaret();
+            rtbGeneratedScript.Refresh();
+        };
+
+        if (rtbGeneratedScript.InvokeRequired) rtbGeneratedScript.Invoke(apply);
+        else apply();
     }
 
     private List<int> GetSelectedRowIndices()
@@ -605,14 +713,64 @@ public class MainForm : Form
         return sb.ToString();
     }
 
+    // Builds conditional update similar to Audit: IF NOT EXISTS(check on keys+modified cols) BEGIN UPDATE ... END
+    private static string BuildConditionalUpdateScript(TableInfo tbl, List<string> keyCols, List<string> setCols, List<Dictionary<string, object?>> rows)
+    {
+        var sb = new StringBuilder();
+        var fn = FullName(tbl);
+        foreach (var row in rows)
+        {
+            // determine modified cols by comparing original values? here we don't have old values, so use setCols as modified set
+            var modifiedCols = setCols;
+            if (modifiedCols.Count == 0) continue;
+
+            // build check conditions: keys + modified cols
+            var checkConditions = new List<string>();
+            foreach (var key in keyCols)
+            {
+                var val = row.GetValueOrDefault(key);
+                if (val is null or DBNull) checkConditions.Add($"{key} IS NULL");
+                else checkConditions.Add($"{key} = {FmtVal(val)}");
+            }
+            foreach (var col in modifiedCols)
+            {
+                var val = row.GetValueOrDefault(col);
+                if (val is null or DBNull) checkConditions.Add($"{col} IS NULL");
+                else checkConditions.Add($"{col} = {FmtVal(val)}");
+            }
+
+            var set = string.Join(", ", modifiedCols.Select(c => $"{c} = {FmtVal(row.GetValueOrDefault(c))}"));
+
+            sb.AppendLine($"IF NOT EXISTS(SELECT 1 FROM {fn} WHERE {string.Join(" AND ", checkConditions)})");
+            sb.AppendLine("BEGIN");
+            sb.AppendLine($"  UPDATE {fn}");
+            sb.AppendLine($"  SET {set}");
+            sb.AppendLine($"  WHERE {WhereClause(keyCols, row)}");
+            sb.AppendLine("END");
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
     private static string BuildDeleteScript(TableInfo tbl, List<string> keyCols, List<Dictionary<string, object?>> rows)
     {
         var sb = new StringBuilder();
         var fn = FullName(tbl);
         foreach (var row in rows)
         {
-            sb.AppendLine($"DELETE FROM {fn}");
-            sb.AppendLine($"WHERE {WhereClause(keyCols, row)}");
+            if (keyCols != null && keyCols.Count > 0)
+            {
+                sb.AppendLine($"IF EXISTS(SELECT 1 FROM {fn} WHERE {WhereClause(keyCols, row)})");
+                sb.AppendLine("BEGIN");
+                sb.AppendLine($"  DELETE FROM {fn} WHERE {WhereClause(keyCols, row)}");
+                sb.AppendLine("END");
+            }
+            else
+            {
+                // Fallback: no key columns provided, perform plain delete
+                sb.AppendLine($"DELETE FROM {fn}");
+                sb.AppendLine($"WHERE {WhereClause(keyCols, row)}");
+            }
             sb.AppendLine();
         }
         return sb.ToString();
@@ -649,8 +807,9 @@ public class MainForm : Form
                 : new List<string>();
 
             AddMessage($"Tabelle selezionate con filtri: {tables.Count}");
-            rtbSqlScript.Text = AuditScriptBuilder.BuildInitScript(db, auditDb, tables);
-            AddMessage($"Script generato: {tables.Count} tabelle + {tables.Count * 3} trigger.");
+            // Clear existing SQL and set the generated audit init script
+            SetSqlScript(AuditScriptBuilder.BuildInitScript(db, auditDb, tables));
+            AddMessage($"Fine - Creazione script: Inizializzazione/Reset Audit_UPD. Script generato: {tables.Count} tabelle + {tables.Count * 3} trigger.");
         }
         finally { SetLoading(false); }
     }
@@ -659,24 +818,24 @@ public class MainForm : Form
     {
         var db = cmbDatabases.SelectedItem as string;
         if (string.IsNullOrEmpty(db)) { MessageBox.Show("Seleziona prima un database."); return; }
-        AddMessage("Elimina sistema di Audit (DISINSTALLAZIONE)");
-        rtbSqlScript.Text = AuditScriptBuilder.BuildRemoveScript(db);
+        SetSqlScript(AuditScriptBuilder.BuildRemoveScript(db));
+        AddMessage("Fine - Creazione script: Eliminazione sistema Audit (DISINSTALLAZIONE)");
     }
 
     private void AuditActivate()
     {
         var db = cmbDatabases.SelectedItem as string;
         if (string.IsNullOrEmpty(db)) { MessageBox.Show("Seleziona prima un database."); return; }
-        AddMessage("Attiva trigger Audit (INIZIO ATTIVITÀ)");
-        rtbSqlScript.Text = AuditScriptBuilder.BuildActivateScript(db);
+        SetSqlScript(AuditScriptBuilder.BuildActivateScript(db));
+        AddMessage("Fine - Creazione script: Attivazione trigger Audit (INIZIO ATTIVITÀ)");
     }
 
     private void AuditDeactivate()
     {
         var db = cmbDatabases.SelectedItem as string;
         if (string.IsNullOrEmpty(db)) { MessageBox.Show("Seleziona prima un database."); return; }
-        AddMessage("Disattiva trigger Audit (PAUSA ATTIVITÀ)");
-        rtbSqlScript.Text = AuditScriptBuilder.BuildDeactivateScript(db);
+        SetSqlScript(AuditScriptBuilder.BuildDeactivateScript(db));
+        AddMessage("Fine - Creazione script: Disattivazione trigger Audit (PAUSA ATTIVITÀ)");
     }
 
     private async Task AuditGenerateScriptAsync()
@@ -821,7 +980,7 @@ public class MainForm : Form
             }
 
             sb.AppendLine($"-- Comandi totali: {totalCmds}");
-            rtbSqlScript.Text = sb.ToString();
+            SetSqlScript(sb.ToString());
             rtbGeneratedScript.Text = sb.ToString();
             tabResults.SelectedTab = tabText;
             AddMessage($"✅ Script generato: {totalCmds} comandi da {tableNames.Count} tabelle");
@@ -833,8 +992,49 @@ public class MainForm : Form
 
     private void SetLoading(bool loading)
     {
+        if (InvokeRequired)
+        {
+            Invoke(() => SetLoading(loading));
+            return;
+        }
+
         lblStatusLoading.Text = loading ? "⏳ Caricamento…" : "";
         UseWaitCursor = loading;
+    }
+
+    // Appends text to the SQL editor in a thread-safe way
+    private void AppendToSqlScript(string text)
+    {
+        if (rtbSqlScript is null) return;
+        Action apply = () =>
+        {
+            if (!string.IsNullOrEmpty(rtbSqlScript.Text))
+                rtbSqlScript.AppendText(Environment.NewLine + text);
+            else
+                rtbSqlScript.AppendText(text);
+            rtbSqlScript.SelectionStart = rtbSqlScript.TextLength;
+            rtbSqlScript.ScrollToCaret();
+            rtbSqlScript.Refresh();
+        };
+
+        if (rtbSqlScript.InvokeRequired) rtbSqlScript.Invoke(apply);
+        else apply();
+    }
+
+    // Replaces the SQL editor content in a thread-safe way
+    private void SetSqlScript(string text)
+    {
+        if (rtbSqlScript is null) return;
+        Action apply = () =>
+        {
+            rtbSqlScript.Text = text;
+            rtbSqlScript.SelectionStart = 0;
+            rtbSqlScript.ScrollToCaret();
+            rtbSqlScript.Refresh();
+        };
+
+        if (rtbSqlScript.InvokeRequired) rtbSqlScript.Invoke(apply);
+        else apply();
     }
 
     private void AddMessage(string msg)
@@ -845,6 +1045,16 @@ public class MainForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        // Persist UI settings (table search + default conditional update)
+        try
+        {
+            var s = Services.SettingsService.LoadAuditSettings();
+            s.TableSearch = txtTableSearch?.Text ?? string.Empty;
+            s.DefaultConditionalUpdate = _defaultConditionalUpdate;
+            Services.SettingsService.SaveAuditSettings(s);
+        }
+        catch { }
+
         _sql.Dispose();
         base.OnFormClosed(e);
     }
