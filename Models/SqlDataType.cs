@@ -1,0 +1,38 @@
+namespace PBScriptNew.Models;
+
+public enum SqlDataType
+{
+    Empty = 0,
+    TinyInt = 16,
+    SmallInt = 2,
+    Integer = 3,
+    BigInt = 20,
+    UnsignedTinyInt = 17,
+    UnsignedSmallInt = 18,
+    UnsignedInt = 19,
+    UnsignedBigInt = 21,
+    Single = 4,
+    Double = 5,
+    Currency = 6,
+    Decimal = 14,
+    Numeric = 131,
+    Boolean = 11,
+    Error = 10,
+    UserDefined = 132,
+    Variant = 12,
+    GUID = 72,
+    Date = 7,
+    DBDate = 133,
+    DBTime = 134,
+    DBTimeStamp = 135,
+    Char = 129,
+    VarChar = 200,
+    LongVarChar = 201,
+    WChar = 130,
+    VarWChar = 202,
+    LongVarWChar = 203,
+    Binary = 128,
+    VarBinary = 204,
+    LongVarBinary = 205,
+    VarNumeric = 139
+}
